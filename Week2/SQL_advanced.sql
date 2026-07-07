@@ -18,6 +18,30 @@ USE coffeeshop_db;
 -- for THAT SAME store (correlated subquery).
 -- Sort by store_name, then order_total DESC.
 
+SELECT o.order_id, CONCAT(c.first_name, ' ', c.last_name) AS customer_name, s.name AS store_name, o.order_datetime, SUM(oi.quantity * p.price) AS order_total
+FROM orders o 
+INNER JOIN customers AS c ON o.customer_id = c.customer_id
+INNER JOIN stores AS s ON o.store_id = s.store_id
+INNER JOIN order_items AS oi ON o.order_id = oi.order_id
+INNER JOIN products AS p ON oi.product_id = p.product_id
+INNER JOIN (
+    SELECT OrderTotalsPerOrder.store_id, AVG(inner_order_total) AS avg_store_order_total
+    FROM (
+        SELECT inner_o.store_id, SUM(inner_oi.quantity * inner_p.price) AS inner_order_total
+        FROM orders AS inner_o
+        INNER JOIN order_items AS inner_oi ON inner_o.order_id = inner_oi.order_id
+        INNER JOIN products AS inner_p ON inner_oi.product_id = inner_p.product_id
+        WHERE inner_o.status = 'paid'
+        GROUP BY inner_o.order_id, inner_o.store_id
+    ) AS OrderTotalsPerOrder
+    GROUP BY OrderTotalsPerOrder.store_id
+) AS AvgTotalsPerStore ON o.store_id = AvgTotalsPerStore.store_id
+WHERE o.status = 'paid'
+GROUP BY o.order_id, customer_name, store_name, o.order_datetime, AvgTotalsPerStore.avg_store_order_total
+HAVING SUM(oi.quantity * p.price) > AvgTotalsPerStore.avg_store_order_total
+ORDER BY store_name ASC, order_total DESC;
+
+
 -- =========================================================
 -- Q2) CTE: Daily revenue and 3-day rolling average (PAID only)
 -- =========================================================
@@ -28,6 +52,25 @@ USE coffeeshop_db;
 --   rolling_3day_avg = average of revenue_day over the current day and the prior 2 days.
 -- Use a window function for the rolling average.
 -- Sort by store_name, order_date.
+WITH revenue_daily AS (
+	SELECT SUM(oi.quantity * p.price) AS revenue_day, o.store_id, DATE(o.order_datetime) as order_date
+    FROM order_items AS oi
+    INNER JOIN products AS p ON oi.product_id = p.product_id
+    INNER JOIN orders AS o ON oi.order_id = o.order_id
+    WHERE o.status = 'paid'
+    GROUP BY o.store_id, order_date
+)
+SELECT s.name AS store_name, 
+	rd.order_date, 
+	rd.revenue_day, 
+    AVG(rd.revenue_day) OVER (
+		PARTITION BY s.name
+        ORDER BY rd.order_date
+        ROWS BETWEEN 2 PRECEDING AND CURRENT ROW
+	) AS rolling_3day_avg
+FROM revenue_daily AS rd
+INNER JOIN stores AS s ON rd.store_id = s.store_id
+ORDER BY store_name, rd.order_date;
 
 -- =========================================================
 -- Q3) Window function: Rank customers by lifetime spend (PAID only)
@@ -47,6 +90,31 @@ USE coffeeshop_db;
 -- Use a CTE to compute product_revenue, then a window function (ROW_NUMBER)
 -- partitioned by store to select the top 1.
 -- Sort by store_name.
+WITH customer_spend AS (
+	SELECT c.customer_id, 
+		CONCAT(c.first_name, ' ', c.last_name) AS customer_name,
+		SUM(oi.quantity * p.price) AS total_spend
+	FROM customers AS c
+    INNER JOIN orders AS o ON c.customer_id = o.customer_id
+    INNER JOIN order_items AS oi ON o.order_id = oi.order_id
+    INNER JOIN products AS p ON oi.product_id = p.product_id
+    WHERE o.status = 'paid'
+    GROUP BY c.customer_id
+), total_spend_stats AS (
+	SELECT customer_id,
+		customer_name,
+		total_spend,
+		DENSE_RANK() OVER (ORDER BY total_spend DESC) AS spend_rank,
+		100.0 * total_spend / SUM(total_spend) OVER () AS percent_of_total
+    FROM customer_spend
+)
+SELECT customer_id,
+	customer_name,
+    total_spend,
+    spend_rank,
+    ROUND(percent_of_total, 2) AS percent_of_total
+FROM total_spend_stats
+ORDER BY total_spend DESC;
 
 -- =========================================================
 -- Q5) Subquery: Customers who have ordered from ALL stores (PAID only)
